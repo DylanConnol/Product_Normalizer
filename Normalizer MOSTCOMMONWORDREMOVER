@@ -1,0 +1,419 @@
+import copy
+import re
+
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import manhattan_distances
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+import time
+import pickle
+import pandas as pd
+from collections import Counter
+
+# data = data['product'].tolist()
+# data = [x.lower() for x in data]
+#
+#
+# vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(4,4))
+# tfidfcomputed = vectorizer.fit_transform(data)
+# tfidfarray = tfidfcomputed.toarray()
+# print(tfidfcomputed.shape)
+# print(tfidfcomputed.shape[0])
+# print(tfidfcomputed.toarray()[0])
+#
+# print("Computed Tfidf scores")
+def manhattan(a, b):
+    return sum(abs(val1-val2) for val1, val2 in zip(a,b))
+
+
+def compute_tfidf(dataframe_data, n_gram_level):
+    data_compute = [x.lower() for x in dataframe_data]
+    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(n_gram_level, n_gram_level))
+    tfidfcomputed = vectorizer.fit_transform(data_compute)
+    tfidfarray = tfidfcomputed.toarray()
+    tfidfarray_condensed = []
+    for i in range(len(tfidfarray)):
+        tfidfarray_condensed.append([[ind, x] for ind, x in enumerate(tfidfarray[i]) if x != 0])
+        print("Preprocessing . . . {0} / {1}".format(i, len(tfidfarray)))
+    return tfidfarray_condensed, tfidfcomputed, vectorizer, tfidfarray
+
+class Product_Match:
+    def __init__(self, product_name):
+        self.product_name = [product_name.lower()]
+
+
+    def getRecommendation(self, tfidf_array_condensed, computed_Tfidf, tfidfvectorizr, tfidf_to_array, hyperparameter1, hyperparameter2, itemkey = [], manhattan_distance = 6):
+        current_match = []
+        tfidf_array = tfidf_to_array
+        product_tfidf = tfidfvectorizr.transform(self.product_name)
+        product_list = (product_tfidf.toarray()[0])
+
+        nonzeroes = []
+        for i in range(len(product_list)):
+            if product_list[i] != 0:
+                nonzeroes.append([i, product_list[i]])
+        nonzeroes = sorted(nonzeroes, key =lambda x: x[-1])
+        nonzeroes = [x[0] for x in nonzeroes]
+        for i in range(computed_Tfidf.shape[0]):
+            if not i in itemkey or itemkey == []:
+                x = 0
+                for j in range(min(len(nonzeroes), hyperparameter1)):
+                    if tfidf_array[i][nonzeroes[j]] != 0:
+                        x += 1
+
+                if x >= min(len(nonzeroes),hyperparameter2):
+                    indexes = [x[0] for x in tfidf_array_condensed[i]]
+                    indexes = list(set(indexes + nonzeroes))
+                    product_list_revised = []
+                    tfidf_revised = []
+                    for k in indexes:
+                        product_list_revised.append(product_list[k])
+                        tfidf_revised.append(tfidf_array[i][k])
+                    similarity = manhattan(tfidf_revised, product_list_revised)
+
+                    if len(tfidf_array_condensed[i]) == 0:
+                        similarity = -1000
+
+                    if abs(similarity) < manhattan_distance:
+                        current_match.append([similarity, i])
+        for match in range(len(current_match)):
+            try:
+                current_match[match][0] = cosine_similarity(product_tfidf, computed_Tfidf[current_match[match][1]])[0][0]
+            except:
+                current_match = [[-1, -1],[-1,-1]]
+        return current_match
+#Parameters for optimization (all should be integers)
+SIMILARITY_THRESHOLD = 0
+N_GRAM_LEVEL = 3
+NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER = 10
+MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS = 4
+
+#Similarity score threshold for grouping:
+similarity_score_threshold = 0.75
+# similarity_score_threshold2 = 0.7
+#Precomputing
+start = time.time()
+
+
+#IF THERE IS A PRODUCT THAT IS LESS THAN 4 DIGITS LONG, IT JUST SIMPLY GETS MARKED WITH NOTHING,
+#BECAUSE NGRAM IS SET TO 4. THIS MEANS IT HAS AN INNATE BIAS TOWARDS SHORTER STRINGS
+#SOLUTION: DISREGARD ANY STRING TOO SMALL???
+
+the_imported_data = pd.read_csv('products_50_shops_CA_modified.csv')
+product_data = the_imported_data['product'].tolist()
+brands = the_imported_data['brands_revised'].tolist()
+products_revised = []
+
+flavors = the_imported_data['flavor'].tolist()
+unique_flavors = the_imported_data['flavor'].unique().tolist()
+flavors_revised = []
+THETESTBRAND = "flav"
+for i in range(len(product_data)):
+    if brands[i] == THETESTBRAND:
+        #Remove every word containing a number:
+        product = ' '.join(s for s in product_data[i].split() if not any(c.isdigit() for c in s))
+        #remove everything in parantheses:
+        product = re.sub(r'\([^)]*\)', '', product)
+        #remove everythign in asterisks
+        product = re.sub(r'\*[^)]*\*', '', product)
+        products_revised.append(product)
+        try:
+            product = product.replace('promo', '')
+        except:
+            pass
+        product = product.lower()
+        flavors_revised.append(flavors[i])
+the_data_grouped1 = copy.deepcopy(products_revised)
+
+regex = re.compile('[^a-zA-Z]')
+products_revised2 = [regex.sub('', x.lower()) for x in products_revised]
+tfidfcondensed, tfidfcomputed, vectorizer, tfidfarray = compute_tfidf(products_revised2, N_GRAM_LEVEL)
+end = time.time()
+tfidfcondensed1, tfidfcomputed1, vectorizer1, tfidfarray1 = compute_tfidf(products_revised2, N_GRAM_LEVEL + 2)
+
+print("Time it took for preprocessing: {0} seconds".format(end - start))
+
+num_groups = 0
+#Actual product matchup
+start = time.time()
+
+num_groups = 0
+matched_data = []
+for i in range(len(the_data_grouped1)):
+    if isinstance(the_data_grouped1[i], str) and len(the_data_grouped1[i]) > N_GRAM_LEVEL:
+        regex = re.compile('[^a-zA-Z]')
+        product = the_data_grouped1[i].lower()
+        try:
+            product = product.replace(THETESTBRAND, "")
+        except:
+            pass
+        product = regex.sub('', product)
+        product = Product_Match(product)
+        # if len(the_data_grouped1[i]) > 35:
+        #     recommendations = product.getRecommendation(tfidfcondensed1, tfidfcomputed1, vectorizer1, tfidfarray1,
+        #                                             NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+        #                                             MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        #     recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        #     recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold2]
+        # else:
+        recommendations = product.getRecommendation(tfidfcondensed, tfidfcomputed, vectorizer, tfidfarray,
+                                                    NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+                                                    MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold]
+        #[similarity, i]
+        product_flavor = flavors_revised[i]
+        if product_flavor != "No flavor found :(":
+            recommendations = [x for x in recommendations if flavors_revised[x[1]] == "No flavor found :(" or flavors_revised[x[1]] == product_flavor]
+        r = 0
+        recommendations.sort(key=lambda x: x[0])
+        for recommendation in recommendations:
+            if isinstance(the_data_grouped1[recommendation[1]], list):
+                r = the_data_grouped1[recommendation[1]][1]
+        if len(recommendations) > 0:
+            if r > 0:
+                the_data_grouped1[i] = [the_data_grouped1[i], r]
+            else:
+                the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+            for recommedation in range(len(recommendations)):
+                if isinstance(the_data_grouped1[recommendations[recommedation][1]], str):
+                    if r > 0:
+                        the_data_grouped1[recommendations[recommedation][1]] = [
+                            the_data_grouped1[recommendations[recommedation][1]], r]
+                    else:
+                        the_data_grouped1[recommendations[recommedation][1]] = [
+                            the_data_grouped1[recommendations[recommedation][1]], num_groups]
+
+
+            if r == 0:
+                num_groups += 1
+
+
+        else:
+            the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+            num_groups += 1
+            matched_data.append(i)
+    elif isinstance(the_data_grouped1[i], str) and len(the_data_grouped1[i]) <= N_GRAM_LEVEL:
+        the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+        num_groups += 1
+        matched_data.append(i)
+    else:
+        regex = re.compile('[^a-zA-Z]')
+        product = the_data_grouped1[i][0]
+        product = regex.sub('', product.lower())
+
+        product = Product_Match(product)
+
+        recommendations = product.getRecommendation(tfidfcondensed1, tfidfcomputed1, vectorizer1, tfidfarray1,
+                                                        NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+                                                        MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold]
+        # [similarity, i]
+        product_flavor = flavors_revised[i]
+        if product_flavor != "No flavor found :(":
+            recommendations = [x for x in recommendations if
+                               flavors_revised[x[1]] == "No flavor found :(" or flavors_revised[x[1]] == product_flavor]
+        recommendations.sort(key=lambda x: x[0])
+        recommendations = [x for x in recommendations if not isinstance(the_data_grouped1[x[1]], list)]
+        for recommedation in range(len(recommendations)):
+            the_data_grouped1[recommendations[recommedation][1]] = [
+                the_data_grouped1[recommendations[recommedation][1]], the_data_grouped1[i][1]]
+    #print(num_groups)
+    print("Processing . . . {0} / {1} ".format(i, len(the_data_grouped1)))
+print("Number of unique products: ", num_groups)
+print("Number of total products: ", len(the_data_grouped1))
+
+print()
+print()
+print(the_data_grouped1)
+print(len(the_data_grouped1))
+debugging_data = copy.deepcopy(the_data_grouped1)
+for i in range(len(the_data_grouped1)):
+    mostcommonword = []
+    for j in range(len(the_data_grouped1)):
+        if the_data_grouped1[i][1] == the_data_grouped1[j][1]:
+            mostcommonword.append(the_data_grouped1[j][0])
+    if len(mostcommonword) > 3:
+        print(mostcommonword)
+        mostcommonword = (" ".join(mostcommonword)).lower()
+        try:
+            mostcommonword = mostcommonword.replace(THETESTBRAND.lower(), "")
+        except:
+            pass
+        for j in range(len(unique_flavors)):
+            try:
+                mostcommonword = mostcommonword.replace(unique_flavors[j].lower(), "")
+            except:
+                pass
+        regex = re.compile('[^a-zA-Z \s]')
+        mostcommonword = regex.sub('', mostcommonword)
+        The_counter = Counter(mostcommonword.split())
+        most_occur = The_counter.most_common(1)
+        mostcommonword = most_occur[0][0]
+        the_data_grouped1[i].append(mostcommonword)
+
+
+
+
+
+
+
+
+# the_data_grouped = [str("Num: ", x[1]) for x in the_data_grouped]
+# the_imported_data['Unique Global ID'] = the_data_grouped
+# the_imported_data.to_csv('products_50_shops_CA_modified.csv')
+
+
+the_new_data_grouped = []
+for x in range(len(the_data_grouped1)):
+    if len(the_data_grouped1[x]) > 2:
+        try:
+            the_data_grouped1[x][0] = the_data_grouped1[x][0].lower().replace(the_data_grouped1[x][2], "")
+        except:
+            pass
+    the_new_data_grouped.append(the_data_grouped1[x][0])
+num_groups = 0
+
+
+
+
+
+the_data_grouped1 = copy.deepcopy(the_new_data_grouped)
+regex = re.compile('[^a-zA-Z]')
+products_revised3 = [regex.sub('', x.lower()) for x in the_new_data_grouped]
+
+# regex = re.compile('[^a-zA-Z]')
+# products_revised = [regex.sub('', x.lower()) for x in products_revised]
+tfidfcondensed, tfidfcomputed, vectorizer, tfidfarray = compute_tfidf(products_revised3, N_GRAM_LEVEL)
+end = time.time()
+
+
+for i in range(len(the_data_grouped1)):
+    if isinstance(the_data_grouped1[i], str) and len(the_data_grouped1[i]) > N_GRAM_LEVEL:
+        regex = re.compile('[^a-zA-Z]')
+        product = the_data_grouped1[i].lower()
+        try:
+            product = product.replace(THETESTBRAND, "")
+        except:
+            pass
+        product = regex.sub('', product)
+        product = Product_Match(product)
+        # if len(the_data_grouped1[i]) > 35:
+        #     recommendations = product.getRecommendation(tfidfcondensed1, tfidfcomputed1, vectorizer1, tfidfarray1,
+        #                                             NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+        #                                             MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        #     recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        #     recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold2]
+        # else:
+        recommendations = product.getRecommendation(tfidfcondensed, tfidfcomputed, vectorizer, tfidfarray,
+                                                    NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+                                                    MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold]
+        #[similarity, i]
+        product_flavor = flavors_revised[i]
+        if product_flavor != "No flavor found :(":
+            recommendations = [x for x in recommendations if flavors_revised[x[1]] == "No flavor found :(" or flavors_revised[x[1]] == product_flavor]
+        r = 0
+        recommendations.sort(key=lambda x: x[0])
+        for recommendation in recommendations:
+            if isinstance(the_data_grouped1[recommendation[1]], list):
+                r = the_data_grouped1[recommendation[1]][1]
+        if len(recommendations) > 0:
+            if r > 0:
+                the_data_grouped1[i] = [the_data_grouped1[i], r]
+            else:
+                the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+            for recommedation in range(len(recommendations)):
+                if isinstance(the_data_grouped1[recommendations[recommedation][1]], str):
+                    if r > 0:
+                        the_data_grouped1[recommendations[recommedation][1]] = [
+                            the_data_grouped1[recommendations[recommedation][1]], r]
+                    else:
+                        the_data_grouped1[recommendations[recommedation][1]] = [
+                            the_data_grouped1[recommendations[recommedation][1]], num_groups]
+
+
+            if r == 0:
+                num_groups += 1
+
+
+        else:
+            the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+            num_groups += 1
+            matched_data.append(i)
+    elif isinstance(the_data_grouped1[i], str) and len(the_data_grouped1[i]) <= N_GRAM_LEVEL:
+        the_data_grouped1[i] = [the_data_grouped1[i], num_groups]
+        num_groups += 1
+        matched_data.append(i)
+    else:
+        regex = re.compile('[^a-zA-Z]')
+        product = the_data_grouped1[i][0]
+        product = regex.sub('', product.lower())
+
+        product = Product_Match(product)
+
+        recommendations = product.getRecommendation(tfidfcondensed1, tfidfcomputed1, vectorizer1, tfidfarray1,
+                                                        NUMBER_OF_SIMILAR_NGRAMS_PRODUCT_WILL_CONSIDER,
+                                                        MIN_SIMILAR_NGRAM_MATCH_EXCEEDED_FOR_ANALYSIS)
+        recommendations = [x for x in recommendations if isinstance(x[0], float)]
+        recommendations = [x for x in recommendations if x[0] >= similarity_score_threshold]
+        # [similarity, i]
+        product_flavor = flavors_revised[i]
+        if product_flavor != "No flavor found :(":
+            recommendations = [x for x in recommendations if
+                               flavors_revised[x[1]] == "No flavor found :(" or flavors_revised[x[1]] == product_flavor]
+        recommendations.sort(key=lambda x: x[0])
+        recommendations = [x for x in recommendations if not isinstance(the_data_grouped1[x[1]], list)]
+        for recommedation in range(len(recommendations)):
+            the_data_grouped1[recommendations[recommedation][1]] = [
+                the_data_grouped1[recommendations[recommedation][1]], the_data_grouped1[i][1]]
+    #print(num_groups)
+    # print("Processing . . . {0} / {1} ".format(i, len(the_data_grouped1)))
+print("Number of unique products: ", num_groups)
+print("Number of total products: ", len(the_data_grouped1))
+
+print(debugging_data)
+print(the_data_grouped1)
+
+bad_y = []
+for x in range(len(the_data_grouped1)):
+    num = the_data_grouped1[x][-1]
+    for y in range(len(the_data_grouped1)):
+        if the_data_grouped1[y][-1] == num and y > x:
+            the_data_grouped1[x] = the_data_grouped1[x][:-1] + [the_data_grouped1[y][0]] + [the_data_grouped1[x][-1]]
+            bad_y.append(y)
+bad_y = list(set(bad_y))
+for x in sorted(bad_y, reverse = True):
+    the_data_grouped1.pop(x)
+for x in the_data_grouped1:
+    try:
+        if len(x) > 2:
+            print(x)
+    except:
+        pass
+
+bad_y = []
+for x in range(len(debugging_data)):
+    num = debugging_data[x][-1]
+    for y in range(len(debugging_data)):
+        if debugging_data[y][-1] == num and y > x:
+            debugging_data[x] = debugging_data[x][:-1] + [debugging_data[y][0]] + [debugging_data[x][-1]]
+            bad_y.append(y)
+bad_y = list(set(bad_y))
+for x in sorted(bad_y, reverse = True):
+    debugging_data.pop(x)
+
+print()
+print()
+print()
+print(debugging_data)
+print(the_data_grouped1)
+print()
+print(len(the_data_grouped1))
+
+end = time.time()
+
+print("Time it took for one brand: {0} seconds".format(end - start))
+
